@@ -1,0 +1,55 @@
+{
+  "name": "remote-jellyfin-player",
+  "productName": "jellyfin-player",
+  "version": "1.0.0",
+  "description": "远程串流场景下的 Jellyfin 播放器:触摸手势控制、虚拟按键、实时语音字幕。适用于 Moonlight 等远程串流(鼠标/触摸事件转发)",
+  "main": "src/main.js",
+  "author": "MGENT",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/markgoo/remote-jellyfin-player.git"
+  },
+  "keywords": [
+    "jellyfin",
+    "remote-streaming",
+    "moonlight",
+    "electron",
+    "touch-gesture",
+    "faster-whisper",
+    "live-subtitle"
+  ],
+  "scripts": {
+    "start": "electron .",
+    "start:lan": "electron . --server http://<JELLYFIN_HOST>:8096",
+    "test:local": "electron . --local-test",
+    "dist": "electron-builder --win dir"
+  },
+  "devDependencies": {
+    "electron": "^33.2.0",
+    "electron-builder": "^25.1.8"
+  },
+  "build": {
+    "appId": "com.mgent.remotejellyfinplayer",
+    "productName": "jellyfin-player",
+    "directories": {
+      "output": "dist"
+    },
+    "files": [
+      "src/**/*",
+      "test/**/*"
+    ],
+    "extraFiles": [
+      {
+        "from": "config.json",
+        "to": "config.json"
+      }
+    ],
+    "win": {
+      "target": [
+        "dir"
+      ],
+      "signAndEditExecutable": false
+    }
+  }
+}

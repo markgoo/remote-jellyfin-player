@@ -1,0 +1,247 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>手势引擎本地验证页</title>
+<style>
+    html, body { margin: 0; height: 100%; background: #000; overflow: hidden; font-family: "Segoe UI", sans-serif; }
+    video { width: 100vw; height: 100vh; object-fit: contain; background: #000; }
+
+    /* 模拟 Jellyfin 12.x:全屏 OSD 覆盖层,播放时所有点击都落在它身上(而非 video) */
+    .videoOsd {
+        position: fixed; inset: 0; z-index: 5;
+        background: transparent;
+    }
+
+    #bar {
+        position: fixed; left: 0; right: 0; bottom: 0; padding: 14px 24px; z-index: 10;
+        display: flex; align-items: center; gap: 16px;
+        background: linear-gradient(transparent, rgba(0,0,0,.85));
+    }
+    #seek { flex: 1; height: 22px; cursor: pointer; }   /* 假进度条:验证控件区不被手势劫持 */
+    #bar span { color: #fff; font-size: 14px; min-width: 90px; text-align: center; }
+    #hint {
+        position: fixed; top: 14px; left: 14px; max-width: 44vw; z-index: 20;
+        color: rgba(255,255,255,.85); font-size: 13px; line-height: 1.7;
+        background: rgba(0,0,0,.55); padding: 10px 14px; border-radius: 8px;
+        pointer-events: none; white-space: pre-line;
+    }
+    #log {
+        position: fixed; top: 14px; right: 70px; width: 260px; max-height: 40vh; overflow: hidden; z-index: 20;
+        color: #0f0; font: 12px/1.6 Consolas, monospace;
+        background: rgba(0,0,0,.6); padding: 10px 12px; border-radius: 8px;
+        pointer-events: none;
+    }
+</style>
+</head>
+<body>
+<video id="v"></video>
+<div class="videoOsd" id="osd"></div>
+
+<div id="hint">手势引擎本地验证(含 OSD 覆盖层模拟)
+拖入任意视频文件开始播放,或等待自动生成
+· 横滑 ≥80px → 快进/快退(看 toast)
+· 竖滑 ≥80px → 音量 ±(看 toast)
+· 双击画面 → 播放/暂停
+· 单击画面 → 原生 click 重放(此处显示"OSD 弹出"日志)
+· 拖动底部进度条 → 不应触发任何手势</div>
+
+<div id="bar">
+    <span id="cur">00:00</span>
+    <input id="seek" type="range" min="0" max="1000" value="0">
+    <span id="vol">音量 100%</span>
+</div>
+
+<div id="log"></div>
+
+<script>
+    const v = document.getElementById('v');
+    const osd = document.getElementById('osd');
+    const seekEl = document.getElementById('seek');
+    const logEl = document.getElementById('log');
+    const logs = [];
+    function log(msg) {
+        logs.unshift(new Date().toLocaleTimeString() + ' ' + msg);
+        logEl.textContent = logs.slice(0, 12).join('\n');
+        console.warn('[testpage] ' + msg);   // level>=2 → 主进程转发到终端
+    }
+
+    // 拖入本地视频文件
+    document.addEventListener('dragover', e => e.preventDefault());
+    document.addEventListener('drop', e => {
+        e.preventDefault();
+        const f = e.dataTransfer.files[0];
+        if (f) { v.src = URL.createObjectURL(f); v.volume = 1; v.play(); log('load ' + f.name); }
+    });
+
+    // 无外部文件时:canvas + MediaRecorder 自动生成 10 秒测试视频(可 seek、有画面)
+    async function generateTestVideo() {
+        log('生成测试视频中(约10秒)…');
+        const c = document.createElement('canvas');
+        c.width = 1280; c.height = 720;
+        const ctx = c.getContext('2d');
+        const stream = c.captureStream(30);
+        const rec = new MediaRecorder(stream, { mimeType: 'video/webm' });
+        const chunks = [];
+        rec.ondataavailable = e => e.data.size && chunks.push(e.data);
+        const done = new Promise(r => rec.onstop = r);
+        rec.start(200);
+        const t0 = performance.now();
+        while (performance.now() - t0 < 10000) {
+            const t = (performance.now() - t0) / 1000;
+            ctx.fillStyle = '#101820'; ctx.fillRect(0, 0, 1280, 720);
+            ctx.fillStyle = '#2b6cb0'; ctx.fillRect(80 + (t * 60) % 1000, 300, 180, 120);
+            ctx.fillStyle = '#fff'; ctx.font = 'bold 72px sans-serif';
+            ctx.fillText('JFP ' + t.toFixed(1) + 's', 480, 380);
+            await new Promise(r => setTimeout(r, 33));
+        }
+        rec.stop();
+        await done;
+        const url = URL.createObjectURL(new Blob(chunks, { type: 'video/webm' }));
+        v.src = url;
+        await new Promise(r => { v.onloadedmetadata = r; });
+        // MediaRecorder webm 时长元数据缺失的补丁:seek 到结尾让 duration 收敛
+        if (!isFinite(v.duration) || v.duration === 0) {
+            v.currentTime = 1e10;
+            await new Promise(r => { v.ondurationchange = () => isFinite(v.duration) && r(); });
+            v.currentTime = 0;
+        }
+        v.volume = 1;
+        try { await v.play(); } catch (err) { log('play() 失败: ' + err.name); }
+        log('测试视频就绪 duration=' + v.duration.toFixed(1) + 's paused=' + v.paused);
+        return true;
+    }
+
+    // 模拟 Jellyfin 原生行为:覆盖层 click → "OSD"(事件落在 .videoOsd 上,模拟 12.x)
+    document.addEventListener('click', e => {
+        if (e.target === osd || e.target === v) log('原生 click → OSD 弹出(模拟)');
+    }, false);
+    document.addEventListener('dblclick', e => {
+        if (e.target === osd || e.target === v) log('原生 dblclick → 全屏切换(模拟,应被屏蔽)');
+    }, false);
+
+    // 假进度条
+    let draggingSeek = false;
+    seekEl.addEventListener('mousedown', () => { draggingSeek = true; log('进度条 mousedown(原生)'); });
+    window.addEventListener('mouseup', () => draggingSeek = false);
+    seekEl.addEventListener('input', () => {
+        if (v.duration) v.currentTime = v.duration * seekEl.value / 1000;
+    });
+    v.addEventListener('timeupdate', () => {
+        if (!draggingSeek && v.duration) seekEl.value = Math.round(v.currentTime / v.duration * 1000);
+        cur.textContent = fmt(v.currentTime);
+    });
+    function fmt(s) {
+        s = Math.floor(s || 0);
+        return String(Math.floor(s / 60)).padStart(2, '0') + ':' + String(s % 60).padStart(2, '0');
+    }
+
+    // 手势效果可视化的旁证事件
+    v.addEventListener('seeked', () => log('video.seeked → ' + v.currentTime.toFixed(1) + 's'));
+    v.addEventListener('volumechange', () => {
+        vol.textContent = (v.muted ? '静音' : '音量 ' + Math.round(v.volume * 100) + '%');
+        log('video.volumechange → ' + Math.round(v.volume * 100) + '%');
+    });
+    v.addEventListener('play', () => log('video.play'));
+    v.addEventListener('pause', () => log('video.pause'));
+
+    // ---------- 无人值守自测:事件全部派发到 OSD 覆盖层(模拟 Jellyfin 12.x 真实结构) ----------
+    if (new URLSearchParams(location.search).has('selftest')) {
+        const sleep = ms => new Promise(r => setTimeout(r, ms));
+        const fails = [];
+        const assert = (cond, name) => {
+            log((cond ? '✅ PASS ' : '❌ FAIL ') + name);
+            if (!cond) fails.push(name);
+        };
+        function mouse(type, x, y, target) {
+            target.dispatchEvent(new MouseEvent(type, {
+                bubbles: true, cancelable: true, composed: true,
+                clientX: x, clientY: y, button: 0, view: window,
+                buttons: type === 'mouseup' ? 0 : 1
+            }));
+        }
+        const osdCount = () => logs.filter(s => s.includes('OSD 弹出')).length;
+
+        (async () => {
+            try {
+                await generateTestVideo();
+                const r = v.getBoundingClientRect();
+                const cx = r.left + r.width / 2, cy = r.top + r.height / 2;
+
+                // 1. 覆盖层上横滑 +150px → 快进(clamp 到 duration-0.3)
+                v.currentTime = 0; await sleep(60);
+                mouse('mousedown', cx, cy, osd); mouse('mouseup', cx + 150, cy, osd);
+                await sleep(120);
+                assert(v.currentTime > 9, `右滑快进(实际 ${v.currentTime.toFixed(1)}s ≈ 9.7)`);
+
+                // 2. 紧随的 click 应被吞(不弹 OSD)
+                const before = osdCount();
+                mouse('click', cx + 150, cy, osd);
+                await sleep(400);
+                assert(osdCount() === before, '拖动后的 click 被抑制');
+
+                // 3. 覆盖层上横滑 -150px → 快退回 0
+                mouse('mousedown', cx, cy, osd); mouse('mouseup', cx - 150, cy, osd);
+                await sleep(120);
+                assert(v.currentTime < 0.5, `左滑快退(实际 ${v.currentTime.toFixed(1)}s)`);
+
+                // 4. 竖滑 +120px(向下)→ 音量 -10%
+                v.volume = 1; await sleep(60);
+                mouse('mousedown', cx, cy, osd); mouse('mouseup', cx, cy + 120, osd);
+                await sleep(120);
+                assert(Math.abs(v.volume - 0.9) < 0.02, `下滑降音量(实际 ${(v.volume * 100).toFixed(0)}%)`);
+
+                // 5. 竖滑 -120px(向上)→ 音量 +10%
+                v.volume = 0.5; await sleep(60);
+                mouse('mousedown', cx, cy, osd); mouse('mouseup', cx, cy - 120, osd);
+                await sleep(120);
+                assert(Math.abs(v.volume - 0.6) < 0.02, `上滑升音量(实际 ${(v.volume * 100).toFixed(0)}%)`);
+
+                // 6. 覆盖层上双击 → 播放/暂停切换(先等上一测试的 150ms 抑制窗关闭)
+                v.volume = 1;
+                await sleep(250);
+                if (v.paused) { await v.play(); await sleep(100); }
+                const b2 = osdCount();
+                mouse('click', cx, cy, osd); await sleep(100);
+                mouse('click', cx, cy, osd);
+                await sleep(450);
+                log(`双击诊断: paused=${v.paused} extraOSD=${osdCount() - b2}`);
+                assert(v.paused, '双击暂停');
+                assert(osdCount() === b2, '双击的两下 click 未触发 OSD');
+
+                // 7. 原生 dblclick(全屏切换)被屏蔽
+                const dbl = logs.filter(s => s.includes('全屏切换')).length;
+                mouse('dblclick', cx, cy, osd);
+                await sleep(100);
+                assert(logs.filter(s => s.includes('全屏切换')).length === dbl, '原生 dblclick 被屏蔽');
+
+                // 8. 进度条上的大幅横滑不触发手势
+                const t0 = v.currentTime;
+                const sr = seekEl.getBoundingClientRect();
+                const sx = sr.left + sr.width / 2, sy = sr.top + sr.height / 2;
+                mouse('mousedown', sx, sy, seekEl); mouse('mouseup', sx + 300, sy, seekEl);
+                mouse('click', sx + 300, sy, seekEl);
+                await sleep(400);
+                assert(Math.abs(v.currentTime - t0) < 0.3, '进度条区域不被手势劫持');
+
+                // 9. 覆盖层单击 → 300ms 后重放原生 click(OSD 弹出)
+                const b9 = osdCount();
+                mouse('click', cx, cy, osd);
+                await sleep(500);
+                assert(osdCount() > b9, '单击重放为原生 OSD');
+
+                document.title = fails.length ? 'SELFTEST FAIL: ' + fails.join(' | ')
+                                              : 'SELFTEST PASS';
+                log(document.title);
+            } catch (err) {
+                document.title = 'SELFTEST ERROR: ' + err.message;
+                log('❌ ' + err.message);
+            }
+            setTimeout(() => window.close(), 1500);
+        })();
+    } else {
+        generateTestVideo();
+    }
+</script>
+</body>
+</html>
